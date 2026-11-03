@@ -411,6 +411,12 @@ async function main() {
       assert.match(click.inputSchema.properties.selector.description, /ref number/);
     });
 
+    await test("server instructions explain refs and the debug port setup", async () => {
+      const instructions = client.getInstructions();
+      assert.match(instructions, /get_page again/);
+      assert.match(instructions, /CHROME_DEBUG_ADDRESS/);
+    });
+
     await test("tabs marks the attached tab as active", async () => {
       const out = textOf(await call("tabs"));
       assert.match(out, /\(active\)/);

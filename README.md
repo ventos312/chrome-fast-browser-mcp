@@ -69,6 +69,21 @@ The HTTP server gives anyone who can reach it full control of the browser. Set `
 port is reachable from other machines and pass the token from the client, e.g.
 `claude mcp add --transport http chrome-fast http://host:3500/mcp --header "Authorization: Bearer <token>"`.
 
+### Upgrading from 1.0
+After pulling, run `npm install` and `npm run build` again: dependencies changed.
+
+- **Chrome's debug port now listens on this PC only.** Version 1.0 started Chrome with
+  `--remote-debugging-address=0.0.0.0`, which let anyone on the network control the logged-in profile.
+  Both chrome-fast and the bat now use `127.0.0.1`. If a container or another machine connected to
+  Chrome's port `9222` directly, set `CHROME_DEBUG_ADDRESS=0.0.0.0` to restore that; connections through
+  chrome-fast's HTTP mode need no change. The server prints the address it uses when it starts, and
+  tells connected MCP clients about it in its instructions.
+- Page snapshots now include the page text. For the old compact output use `get_page` with
+  `format: "interactive"`.
+- HTTP mode gained a Streamable HTTP endpoint at `/mcp`; the `/sse` endpoint still works.
+
+See `CHANGELOG.md` for the full list of fixes.
+
 ### Verify
 Restart Claude Code. The `mcp__chrome-fast__*` tools should be available. Try:
 - `mcp__chrome-fast__tabs` — lists open Chrome tabs

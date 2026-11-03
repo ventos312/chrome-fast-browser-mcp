@@ -26,9 +26,25 @@ export const CHROME_PROFILE =
  * another machine or container must connect to Chrome directly; the HTTP mode
  * of this server does not need that, because the server is what they talk to.
  */
-const CHROME_DEBUG_ADDRESS = process.env.CHROME_DEBUG_ADDRESS || "127.0.0.1";
+export const CHROME_DEBUG_ADDRESS = process.env.CHROME_DEBUG_ADDRESS || "127.0.0.1";
 // Set CHROME_AUTO_LAUNCH=0 to disable launching Chrome automatically.
-const AUTO_LAUNCH = (process.env.CHROME_AUTO_LAUNCH || "1") !== "0";
+export const AUTO_LAUNCH = (process.env.CHROME_AUTO_LAUNCH || "1") !== "0";
+
+/** True when the launched Chrome accepts DevTools connections from this machine only. */
+export function debugPortIsLocalOnly(): boolean {
+  return ["127.0.0.1", "localhost", "::1"].includes(CHROME_DEBUG_ADDRESS);
+}
+
+/** One-line summary of how this server reaches Chrome, for the startup log. */
+export function describeChromeSetup(): string {
+  const launch = AUTO_LAUNCH
+    ? `auto-launch on; a launched Chrome listens on ${CHROME_DEBUG_ADDRESS}:${CHROME_PORT} ` +
+      (debugPortIsLocalOnly()
+        ? "(this PC only)"
+        : "(ALL interfaces: anyone who can reach the port controls the browser)")
+    : "auto-launch off (CHROME_AUTO_LAUNCH=0)";
+  return `connects to Chrome at 127.0.0.1:${CHROME_PORT}; ${launch}; profile ${CHROME_PROFILE}`;
+}
 const LAUNCH_TIMEOUT_MS = 30_000;
 
 const devtoolsOptions = { host: CHROME_HOST, port: CHROME_PORT };
@@ -130,7 +146,7 @@ export async function ensureChrome(): Promise<void> {
       }
       process.stderr.write(
         `chrome-fast: Chrome not reachable on port ${CHROME_PORT}; launching ${chrome} ` +
-          `with profile ${CHROME_PROFILE}\n`
+          `with profile ${CHROME_PROFILE}, DevTools listening on ${CHROME_DEBUG_ADDRESS}:${CHROME_PORT}\n`
       );
       const child = spawn(chrome, chromeLaunchArgs(), { detached: true, stdio: "ignore" });
       child.on("error", () => {

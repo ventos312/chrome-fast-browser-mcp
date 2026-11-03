@@ -6,7 +6,14 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
-import { disconnectClient } from "./cdp.js";
+import {
+  AUTO_LAUNCH,
+  CHROME_DEBUG_ADDRESS,
+  CHROME_PORT,
+  debugPortIsLocalOnly,
+  describeChromeSetup,
+  disconnectClient,
+} from "./cdp.js";
 import { navigateToolDef, handleNavigate } from "./tools/navigate.js";
 import {
   getPageToolDef,
@@ -39,6 +46,42 @@ import {
 import { waitToolDef, handleWait } from "./tools/wait.js";
 
 const VERSION = "1.1.0";
+
+// Sent to MCP clients on connect, so the agent driving the browser knows how
+// the tools fit together and what the setup looks like.
+const INSTRUCTIONS = [
+  "chrome-fast drives a real, logged-in Chrome through the DevTools protocol.",
+  "Start with navigate or get_page. Both return the page as an accessibility tree whose numbered " +
+    'refs (pass them as strings, e.g. "12") go to click, type, scroll and fill_form. Refs go stale ' +
+    "when the page changes; if a tool says so, call get_page again.",
+  "Prefer get_page over screenshot, and use screenshot only when layout matters. Use evaluate for " +
+    "anything the other tools cannot express; it behaves like the DevTools console.",
+  'Lines starting with "Note:" report things handled automatically, such as dismissed dialogs or a ' +
+    "page that did not finish loading in time.",
+  `Setup: this server talks to Chrome on 127.0.0.1:${CHROME_PORT}` +
+    (AUTO_LAUNCH
+      ? " and launches Chrome itself when nothing is listening there."
+      : "; auto-launch is off (CHROME_AUTO_LAUNCH=0), so Chrome must be started with start-chrome-debug.bat.") +
+    " A Chrome started by chrome-fast or by start-chrome-debug.bat has its DevTools port listen on " +
+    CHROME_DEBUG_ADDRESS +
+    (debugPortIsLocalOnly()
+      ? " (this machine only; since 1.1 the default is no longer 0.0.0.0, because the protocol has no " +
+        "authentication). If another machine or a container must connect to Chrome directly, the user " +
+        "sets CHROME_DEBUG_ADDRESS=0.0.0.0; clients of this server's own HTTP mode need no change."
+      : ", which is reachable from other machines."),
+].join("\n");
+
+function logStartup(mode: string): void {
+  process.stderr.write(`chrome-fast ${VERSION} ${mode}\n`);
+  process.stderr.write(`chrome-fast: ${describeChromeSetup()}\n`);
+  if (debugPortIsLocalOnly()) {
+    process.stderr.write(
+      "chrome-fast: Chrome's debug port is reachable from this PC only (changed in 1.1; it used to be " +
+        "0.0.0.0). Set CHROME_DEBUG_ADDRESS=0.0.0.0 only if a container or another machine must connect " +
+        "to Chrome directly; clients of this server's HTTP mode are unaffected.\n"
+    );
+  }
+}
 
 interface ToolDef {
   name: string;
@@ -79,7 +122,7 @@ function registerTextTool(
 }
 
 function createServer(): McpServer {
-  const server = new McpServer({ name: "chrome-fast", version: VERSION });
+  const server = new McpServer({ name: "chrome-fast", version: VERSION }, { instructions: INSTRUCTIONS });
 
   registerTextTool(server, navigateToolDef, handleNavigate);
   registerTextTool(server, getPageToolDef, handleGetPage, { readOnlyHint: true });
@@ -232,9 +275,9 @@ async function runHttp(port: number): Promise<void> {
   });
 
   httpServer.listen(port, host, () => {
-    process.stderr.write(
-      `chrome-fast MCP server listening on http://${host}:${port} ` +
-        `(Streamable HTTP at /mcp, legacy SSE at /sse${HTTP_TOKEN ? ", bearer token required" : ""})\n`
+    logStartup(
+      `listening on http://${host}:${port} ` +
+        `(Streamable HTTP at /mcp, legacy SSE at /sse${HTTP_TOKEN ? ", bearer token required" : ""})`
     );
   });
 
@@ -255,7 +298,7 @@ async function runStdio(): Promise<void> {
   process.on("SIGINT", () => shutdown(0));
   process.on("SIGTERM", () => shutdown(0));
   await server.connect(transport);
-  process.stderr.write("chrome-fast MCP server running on stdio\n");
+  logStartup("running on stdio");
 }
 
 async function main() {
