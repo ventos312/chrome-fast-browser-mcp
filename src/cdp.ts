@@ -63,10 +63,24 @@ export function getDocumentEpoch(): number {
   return documentEpoch;
 }
 
-/** When true, beforeunload prompts are accepted (navigate / tab_close with force: true). */
-let forceUnload = false;
-export function setForceUnload(value: boolean): void {
-  forceUnload = value;
+/**
+ * What to do when a page asks to confirm leaving (beforeunload) because it has
+ * unsaved changes. "dismiss" keeps the page: used when chrome-fast itself would
+ * leave it (navigate, tab_close). "accept" lets it go: used while an action the
+ * agent requested on the page (a click, Enter, a form submit) runs, since
+ * leaving is then the consequence of that action, and for force: true.
+ */
+export type UnloadPolicy = "dismiss" | "accept";
+let unloadPolicy: UnloadPolicy = "dismiss";
+
+export async function withUnloadPolicy<T>(policy: UnloadPolicy, fn: () => Promise<T>): Promise<T> {
+  const previous = unloadPolicy;
+  unloadPolicy = policy;
+  try {
+    return await fn();
+  } finally {
+    unloadPolicy = previous;
+  }
 }
 
 let unloadCancelCount = 0;
@@ -256,13 +270,15 @@ function installDialogHandling(c: CDPClient): void {
   c.on("Page.javascriptDialogOpening", (p: { type: string; message: string }) => {
     let accept: boolean;
     if (p.type === "beforeunload") {
-      accept = forceUnload;
-      if (!accept) {
-        unloadCancelCount++;
+      accept = unloadPolicy === "accept";
+      if (accept) {
         addNote(
-          "The page has unsaved changes and asked to confirm leaving, so the action was cancelled to protect them. " +
-            "Save the work first, open a fresh tab with tab_new, or repeat with force: true to leave anyway."
+          "The page asked to confirm leaving because it has unsaved changes; the prompt was accepted " +
+            "because leaving was the consequence of the action you requested."
         );
+      } else {
+        // navigate / tab_close report this as an error themselves
+        unloadCancelCount++;
         c.emit(UNLOAD_CANCELLED_EVENT);
       }
     } else {
@@ -364,7 +380,7 @@ export async function closeTab(targetId: string, force: boolean): Promise<"close
   await ensureChrome();
   const cancelledBefore = unloadCancelCount;
   let temporary: CDPClient | null = null;
-  forceUnload = force;
+  return withUnloadPolicy(force ? "accept" : "dismiss", async () => {
   try {
     let session = client && activeTargetId === targetId ? client : null;
     if (!session) {
@@ -392,7 +408,6 @@ export async function closeTab(targetId: string, force: boolean): Promise<"close
     }
     return "kept";
   } finally {
-    forceUnload = false;
     if (temporary) {
       try {
         await temporary.close();
@@ -401,6 +416,7 @@ export async function closeTab(targetId: string, force: boolean): Promise<"close
       }
     }
   }
+  });
 }
 
 export async function disconnectClient(): Promise<void> {

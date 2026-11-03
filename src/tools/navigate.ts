@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { addNote, getClient, getUnloadCancelCount, setForceUnload } from "../cdp.js";
+import { addNote, getClient, getUnloadCancelCount, withUnloadPolicy } from "../cdp.js";
 import { getAccessibilityTree } from "../utils/accessibility.js";
 import { sleep, waitForNavigation, type WaitUntil } from "../utils/waits.js";
 
@@ -8,7 +8,7 @@ export const navigateToolDef = {
   description:
     "Navigate the current tab to a URL and return the page content as an accessibility tree " +
     "with numbered element refs you can pass to click/type. If the current page has unsaved " +
-    "changes that it asks to confirm, the navigation is cancelled and reported unless force is set.",
+    "changes that it asks to confirm, the call fails instead of discarding them, unless force is set.",
   schema: {
     url: z
       .string()
@@ -60,37 +60,38 @@ export async function handleNavigate(args: {
   const until = (args.waitUntil ?? "load") as WaitUntil;
   const timeoutMs = args.timeout ?? DEFAULT_TIMEOUT_MS;
   const cancelledBefore = getUnloadCancelCount();
+  const refused = () =>
+    new Error(
+      "Navigation cancelled: the page has unsaved changes and asked to confirm leaving. " +
+        "Save them first, open a fresh tab with tab_new, or repeat with force: true to leave anyway."
+    );
 
   // The beforeunload prompt can open after Page.navigate has returned, so the
-  // force setting has to stay in place until the wait is over.
-  setForceUnload(!!args.force);
-  try {
+  // policy has to stay in place until the wait is over.
+  await withUnloadPolicy(args.force ? "accept" : "dismiss", async () => {
     const { errorText, frameId, loaderId } = await client.Page.navigate({ url });
     const cancelled = () => getUnloadCancelCount() > cancelledBefore;
 
-    if (errorText && errorText !== "net::ERR_HTTP_RESPONSE_CODE_FAILURE" && !cancelled()) {
+    if (cancelled()) throw refused();
+    if (errorText && errorText !== "net::ERR_HTTP_RESPONSE_CODE_FAILURE") {
       throw new Error(`Navigation to ${url} failed: ${errorText}`);
     }
     if (errorText === "net::ERR_HTTP_RESPONSE_CODE_FAILURE") {
       addNote(`The server answered ${url} with an HTTP error status.`);
     }
-    // The page refused to be left; its note is already queued.
-    if (cancelled()) return getAccessibilityTree();
 
     // Without a loaderId the navigation was same-document (only the hash
     // changed); it has already happened and fires no load event.
     if (loaderId) {
       const outcome = await waitForNavigation(client, { frameId, loaderId, until, timeoutMs });
+      if (outcome === "cancelled") throw refused();
       if (outcome === "timeout") {
         addNote(
           `The page had not reached "${until}" after ${timeoutMs} ms; the content below may be incomplete.`
         );
       }
-      if (outcome === "cancelled") return getAccessibilityTree();
     }
-  } finally {
-    setForceUnload(false);
-  }
+  });
 
   // Give scripts a moment to render dynamic content.
   await sleep(200);

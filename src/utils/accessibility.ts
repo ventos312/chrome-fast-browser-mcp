@@ -172,6 +172,12 @@ const hiddenReasons = new Set([
   "ariaHiddenSubtree",
 ]);
 
+
+const isOpenModal = (node: AXNode): boolean =>
+  !node.ignored &&
+  (node.role?.value === "dialog" || node.role?.value === "alertdialog") &&
+  propertyValue(node, "modal") === true;
+
 const collapse = (s: unknown): string => String(s ?? "").replace(/\s+/g, " ").trim();
 const clip = (s: string, max: number): string => (s.length > max ? s.slice(0, max) + "…" : s);
 
@@ -232,6 +238,9 @@ function describeStates(node: AXNode): string {
         if (val === true) states.push("expanded");
         else if (val === false) states.push("collapsed");
         break;
+      case "modal":
+        if (val === true) states.push("modal");
+        break;
       case "invalid":
         if (val && val !== "false") states.push("invalid");
         break;
@@ -255,8 +264,12 @@ function describeValue(node: AXNode): string {
   return ` value="${clip(text, MAX_VALUE)}"`;
 }
 
-/** Depth-first (document) order of a flat node list, via parent/child links. */
-function documentOrder(nodes: AXNode[], byId: Map<string, AXNode>): AXNode[] {
+/**
+ * Depth-first (document) order of a flat node list, via parent/child links.
+ * Subtrees in `first` (open modal dialogs) come before everything else, since
+ * they are what the agent has to deal with before the rest of the page.
+ */
+function documentOrder(nodes: AXNode[], byId: Map<string, AXNode>, first: AXNode[] = []): AXNode[] {
   const ordered: AXNode[] = [];
   const seen = new Set<string>();
   const visit = (node: AXNode) => {
@@ -268,6 +281,7 @@ function documentOrder(nodes: AXNode[], byId: Map<string, AXNode>): AXNode[] {
       if (child) visit(child);
     }
   };
+  for (const node of first) visit(node);
   for (const node of nodes) if (!node.parentId || !byId.has(node.parentId)) visit(node);
   for (const node of nodes) visit(node); // anything not reachable from a root
   return ordered;
@@ -299,6 +313,8 @@ interface AXBuild {
   snapshot: Snapshot;
   /** Nodes hidden on purpose (modal, inert, aria-hidden). */
   hidden: number;
+  /** The open modal dialog listed first, if any, and whether anything else is visible behind it. */
+  modal: { name: string; pageBehind: boolean } | null;
 }
 
 async function buildFromAXTree(
@@ -311,8 +327,19 @@ async function buildFromAXTree(
   const byId = new Map<string, AXNode>(rawNodes.map((n) => [n.nodeId, n]));
   // Chrome returns the tree breadth-first, which puts a page's form fields far
   // below the headings they belong to. Re-order depth-first so lines follow
-  // the document.
-  const nodes = documentOrder(rawNodes, byId);
+  // the document, with any open modal dialog ahead of everything else.
+  const modals = rawNodes.filter(isOpenModal);
+  const nodes = documentOrder(rawNodes, byId, modals);
+  const insideModal = new Set<string>();
+  for (const modal of modals) {
+    insideModal.add(modal.nodeId);
+    const stack = [...(modal.childIds ?? [])];
+    while (stack.length) {
+      const id = stack.pop()!;
+      insideModal.add(id);
+      stack.push(...(byId.get(id)?.childIds ?? []));
+    }
+  }
 
   const descendants = (node: AXNode): string[] => {
     const out: string[] = [];
@@ -329,6 +356,7 @@ async function buildFromAXTree(
   const body: string[] = [];
   let refs = 0;
   let hidden = 0;
+  let linesBehindModal = 0;
   const skip = new Set<string>();
   let menu: { ids: Set<string>; name: string; shown: number; hidden: number } | null = null;
   const closeMenu = () => {
@@ -347,6 +375,7 @@ async function buildFromAXTree(
       if (node.ignoredReasons?.some((r) => hiddenReasons.has(r.name))) hidden++;
       continue;
     }
+    if (modals.length > 0 && !insideModal.has(node.nodeId)) linesBehindModal++;
     const role = node.role?.value;
     if (!role || role === "WebArea" || role === "RootWebArea") continue;
 
@@ -408,7 +437,14 @@ async function buildFromAXTree(
   }
   closeMenu();
 
-  return { snapshot: { epoch, format, title, url, body, refs }, hidden };
+  return {
+    snapshot: { epoch, format, title, url, body, refs },
+    hidden,
+    modal:
+      modals.length > 0
+        ? { name: collapse(modals[0].name?.value), pageBehind: linesBehindModal > 0 }
+        : null,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -575,7 +611,7 @@ async function build(client: CDPClient, opts: SnapshotOptions): Promise<Snapshot
   const format = opts.format ?? "accessibility";
   if (format === "dom") return buildFromDOM(client);
 
-  const { snapshot, hidden } = await buildFromAXTree(client, format, !!opts.expandMenus);
+  const { snapshot, hidden, modal } = await buildFromAXTree(client, format, !!opts.expandMenus);
 
   if (snapshot.refs === 0) {
     // An open modal dialog, or inert / aria-hidden attributes, can hide the
@@ -591,10 +627,14 @@ async function build(client: CDPClient, opts: SnapshotOptions): Promise<Snapshot
       );
       return dom;
     }
-  } else if (hidden >= 20) {
+  } else if (modal) {
+    // Only an actual modal is worth a note: pages are full of aria-hidden
+    // decoration (icons) that hides nothing the agent needs.
     addNote(
-      `${hidden} elements are hidden from the accessibility tree by an open modal dialog or by aria-hidden/inert attributes. ` +
-        'If something you need is missing, close the dialog or call get_page with format: "dom".'
+      `A modal dialog${modal.name ? ` ("${modal.name}")` : ""} is open and listed first; ` +
+        (modal.pageBehind
+          ? "the page behind it follows."
+          : "the rest of the page is hidden until it is closed.")
     );
   }
   return snapshot;

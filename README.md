@@ -105,7 +105,8 @@ exercises every tool. It needs Chrome installed (or `CHROME_PATH` set).
   `screenshot`, `evaluate`
 - `click`, `type`, `scroll`, `fill_form`
 - `wait` (CSS selector, text on the page, network idle, or a fixed time)
-- `batch` (several of the above in one call; stops at the first failing step and returns the page once)
+- `batch` (several of the above in one call; stops at the first failing step, returns each step's own
+  result in full and the page once; `snapshot: false` to skip the page)
 
 ## Notes for drivers
 - Element refs are plain numbers (pass `"55"`). An element keeps its number for as long as you stay on
@@ -124,8 +125,12 @@ exercises every tool. It needs Chrome installed (or `CHROME_PATH` set).
   to `get_page` to continue.
 - When an open modal or `aria-hidden`/`inert` markup leaves the accessibility tree empty, the snapshot
   is built from the DOM instead and says so; `get_page` with `format: "dom"` does that on request.
-- A page with unsaved changes is never left silently: `navigate` and `tab_close` cancel, report, and
-  take `force: true` to proceed. A fresh server attaches to an empty tab when one exists.
+- A page with unsaved changes is never left silently by `navigate` or `tab_close`: they fail with an
+  explanation and take `force: true` to proceed. The agent's own clicks, Enter and form submits on
+  that page go through even when the page asks to confirm, with a `Note:` saying so. A fresh server
+  attaches to an empty tab when one exists.
+- An open modal dialog is listed first in the snapshot, with a `Note:` naming it, since it is what has
+  to be dealt with before the rest of the page.
 - `click` scrolls the element into view first. If another element covers it, a DOM `click()` is
   dispatched instead and a note says so. When a click starts a navigation, the new page is returned.
 - `type` appends to the existing content; use `clear: true` to replace it. `pressEnter: true` submits

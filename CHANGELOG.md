@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.3.0
+
+From the 1.2 benchmark rerun.
+
+### Fixed
+- The unsaved-changes guard cancelled the agent's own Save: a form submit is a navigation, so the
+  page's `beforeunload` prompt fired on `click`, `type` with Enter and `fill_form` with `submit`. Those
+  actions now go through (the prompt is accepted, and a `Note:` says so); only `navigate` and
+  `tab_close` refuse to leave such a page, and they now fail with an explanation instead of returning
+  the unchanged page, so a `batch` stops there.
+- `batch` cut each step's own result at 300 characters, which made agents re-run `evaluate` outside
+  the batch. Step results are now returned in full (up to `CHROME_FAST_MAX_CHARS`), and
+  `snapshot: false` skips the page report while keeping notes.
+- A "hidden elements" note appeared on pages full of `aria-hidden` decoration (every WordPress admin
+  page). The note is now only shown when a modal dialog is actually open, and names it.
+
+### Changed
+- An open modal dialog is listed first in the snapshot (and marked `modal`), so a consent dialog's
+  buttons are not pushed past the output limit by the page behind it.
+
 ## 1.2.0
 
 Driven by a benchmark against real sites (WordPress admin, CNN, Wikipedia).

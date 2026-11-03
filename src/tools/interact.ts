@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { addNote, getClient } from "../cdp.js";
+import { addNote, getClient, withUnloadPolicy } from "../cdp.js";
 import { getPageUpdate } from "../utils/accessibility.js";
 import { resolveElement, getClickPoint } from "../utils/selectors.js";
 import { beginSettle, pressKey, sleep } from "../utils/waits.js";
@@ -93,56 +93,61 @@ export async function handleClick(args: {
   const resolved = await resolveElement(args.selector);
   const { x, y } = await getClickPoint(resolved);
   const button = args.button || "left";
-  const settle = await beginSettle(client);
+  // A click may submit a form or follow a link. If the page then asks to
+  // confirm leaving, that is the consequence of the requested action, so the
+  // prompt is accepted; navigate and tab_close are the calls that refuse.
+  await withUnloadPolicy("accept", async () => {
+    const settle = await beginSettle(client);
 
-  // Check that the point lands on the element and not on something covering it
-  // (a modal, a cookie banner, a sticky header); otherwise the click would go
-  // to the overlay.
-  const { result: hit } = await client.Runtime.callFunctionOn({
-    objectId: resolved.objectId,
-    functionDeclaration: `function(x, y) {
-      const el = document.elementFromPoint(x, y);
-      return !!el && (el === this || this.contains(el));
-    }`,
-    arguments: [{ value: x }, { value: y }],
-    returnByValue: true,
-  });
+    // Check that the point lands on the element and not on something covering it
+    // (a modal, a cookie banner, a sticky header); otherwise the click would go
+    // to the overlay.
+    const { result: hit } = await client.Runtime.callFunctionOn({
+      objectId: resolved.objectId,
+      functionDeclaration: `function(x, y) {
+        const el = document.elementFromPoint(x, y);
+        return !!el && (el === this || this.contains(el));
+      }`,
+      arguments: [{ value: x }, { value: y }],
+      returnByValue: true,
+    });
 
-  if (hit?.value || button !== "left") {
-    if (!hit?.value) {
+    if (hit?.value || button !== "left") {
+      if (!hit?.value) {
+        addNote(
+          "The element is covered by another element at its position; the click may have hit the overlay instead."
+        );
+      }
+      await client.Input.dispatchMouseEvent({ type: "mouseMoved", x, y, button: "none" });
+      await client.Input.dispatchMouseEvent({
+        type: "mousePressed",
+        x,
+        y,
+        button,
+        buttons: BUTTON_MASK[button],
+        clickCount: 1,
+      });
+      await client.Input.dispatchMouseEvent({
+        type: "mouseReleased",
+        x,
+        y,
+        button,
+        buttons: 0,
+        clickCount: 1,
+      });
+    } else {
+      // Fall back to a DOM click so the intended element still receives it.
+      await client.Runtime.callFunctionOn({
+        objectId: resolved.objectId,
+        functionDeclaration: "function() { this.click(); }",
+      });
       addNote(
-        "The element is covered by another element at its position; the click may have hit the overlay instead."
+        "The element was covered by another element at its position, so a DOM click() was dispatched to it instead of a mouse click."
       );
     }
-    await client.Input.dispatchMouseEvent({ type: "mouseMoved", x, y, button: "none" });
-    await client.Input.dispatchMouseEvent({
-      type: "mousePressed",
-      x,
-      y,
-      button,
-      buttons: BUTTON_MASK[button],
-      clickCount: 1,
-    });
-    await client.Input.dispatchMouseEvent({
-      type: "mouseReleased",
-      x,
-      y,
-      button,
-      buttons: 0,
-      clickCount: 1,
-    });
-  } else {
-    // Fall back to a DOM click so the intended element still receives it.
-    await client.Runtime.callFunctionOn({
-      objectId: resolved.objectId,
-      functionDeclaration: "function() { this.click(); }",
-    });
-    addNote(
-      "The element was covered by another element at its position, so a DOM click() was dispatched to it instead of a mouse click."
-    );
-  }
 
-  addNote(await settle.finish());
+    addNote(await settle.finish());
+  });
   return getPageUpdate();
 }
 
@@ -208,11 +213,14 @@ export async function handleType(args: {
   if (args.text) await client.Input.insertText({ text: args.text });
 
   if (args.pressEnter) {
-    const settle = await beginSettle(client);
-    // The "\r" text is what makes Chrome deliver a keypress; without it forms
-    // are not submitted.
-    await pressKey(client, "Enter", 13, "\r");
-    addNote(await settle.finish());
+    // Enter may submit the form; a prompt to confirm leaving is then accepted.
+    await withUnloadPolicy("accept", async () => {
+      const settle = await beginSettle(client);
+      // The "\r" text is what makes Chrome deliver a keypress; without it forms
+      // are not submitted.
+      await pressKey(client, "Enter", 13, "\r");
+      addNote(await settle.finish());
+    });
   } else {
     await sleep(100);
   }
@@ -317,6 +325,7 @@ export async function handleFillForm(args: {
   if (args.submit) {
     const last = args.fields[args.fields.length - 1];
     const resolved = await resolveElement(last.selector);
+    await withUnloadPolicy("accept", async () => {
     const settle = await beginSettle(client);
     const { result, exceptionDetails } = await client.Runtime.callFunctionOn({
       objectId: resolved.objectId,
@@ -339,6 +348,7 @@ export async function handleFillForm(args: {
         `The fields were filled, but "${last.selector}" is not inside a <form>, so nothing was submitted. Click the submit button instead.`
       );
     }
+    });
   }
 
   return getPageUpdate();

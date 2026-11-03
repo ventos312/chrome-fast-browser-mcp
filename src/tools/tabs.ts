@@ -40,7 +40,8 @@ export const tabCloseToolDef = {
   name: "tab_close",
   description:
     "Close a tab by its target ID, or the current tab if omitted. When the current tab is closed, " +
-    "attaches to another open tab.",
+    "attaches to another open tab. A tab with unsaved changes that asks to confirm is kept, and the " +
+    "call fails, unless force is set.",
   schema: {
     targetId: z.string().optional().describe("Target ID of the tab to close (default: current tab)"),
     force: z
@@ -99,7 +100,7 @@ export async function handleTabClose(args: { targetId?: string; force?: boolean 
   const closedCurrent = targetId === current;
   const remaining = pages.filter((t) => t.id !== targetId);
 
-  if ((await closeTab(targetId, !!args.force)) === "kept") return notClosed(closedCurrent);
+  if ((await closeTab(targetId, !!args.force)) === "kept") throw new Error(notClosed(closedCurrent));
 
   // Closing a tab that is not the current one must not change which tab the
   // other tools act on.

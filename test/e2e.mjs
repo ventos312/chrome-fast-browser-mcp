@@ -109,7 +109,25 @@ const routes = {
   ],
   "/dirty": () => [
     200,
-    `<!doctype html><html><head><title>Dirty Page</title></head><body><h1>Dirty</h1><input id="f" value=""><a id="away" href="/second">Leave</a><script>window.addEventListener('beforeunload', (e) => { e.preventDefault(); e.returnValue = ''; });</script></body></html>`,
+    `<!doctype html><html><head><title>Dirty Page</title></head><body><h1>Dirty</h1><form action="/submitted" method="get"><input id="f" name="q" value=""><button id="submit-dirty" type="submit">Save</button></form><a id="away" href="/second">Leave</a><script>window.addEventListener('beforeunload', (e) => { e.preventDefault(); e.returnValue = ''; });</script></body></html>`,
+  ],
+  // Lots of aria-hidden decoration (icons), as admin UIs have, but nothing modal
+  "/decorated": () => [
+    200,
+    `<!doctype html><html><head><title>Decorated Page</title></head><body><h1>Decorated</h1>${Array.from(
+      { length: 40 },
+      (_, i) => `<span aria-hidden="true">icon${i}</span>`
+    ).join("")}<a href="/second">Visible link</a></body></html>`,
+  ],
+  // A native modal dialog: Chrome hides the rest of the page from the accessibility tree
+  "/modal": () => [
+    200,
+    `<!doctype html><html><head><title>Modal Page</title></head><body><h1>Page title</h1><a href="/second">Body link</a><dialog id="d" aria-label="Consent"><p>We use cookies</p><button id="accept-cookies" onclick="document.getElementById('d').close()">Accept all</button></dialog><script>document.getElementById('d').showModal()</script></body></html>`,
+  ],
+  // The CNN shape: a custom aria-modal dialog plus inert content behind it
+  "/consent": () => [
+    200,
+    `<!doctype html><html><head><title>Consent Page</title></head><body><div id="site" inert><h1>News</h1><a href="/second">Story link</a></div><div role="dialog" aria-modal="true" aria-label="Privacy"><p>We value your privacy</p><button id="agree" onclick="document.getElementById('site').removeAttribute('inert'); this.closest('[role=dialog]').remove()">Agree</button></div></body></html>`,
   ],
   "/submitted": (url) => {
     const q = url.searchParams;
@@ -861,9 +879,10 @@ async function main() {
       await call("navigate", { url: `${base}/dirty` });
       // A real click gives the page the user activation it needs to show the prompt
       await call("click", { selector: "#f" });
-      const refused = textOf(await call("navigate", { url: `${base}/second` }));
-      assert.match(refused, /Note: The page has unsaved changes and asked to confirm leaving/);
-      assert.match(refused, /^Page: Dirty Page/m);
+      const refused = await call("navigate", { url: `${base}/second` });
+      assert.equal(refused.isError, true);
+      assert.match(textOf(refused), /Navigation cancelled: the page has unsaved changes/);
+      assert.match(textOf(await call("get_page")), /^Page: Dirty Page/m);
       const forced = textOf(await call("navigate", { url: `${base}/second`, force: true }));
       assert.match(forced, /^Page: Second Page/m);
     });
@@ -871,8 +890,9 @@ async function main() {
     await test("tab_close keeps a tab with unsaved changes unless forced", async () => {
       await call("navigate", { url: `${base}/dirty` });
       await call("click", { selector: "#f" });
-      const refused = textOf(await call("tab_close", {}));
-      assert.match(refused, /The tab was not closed: it has unsaved changes/);
+      const refused = await call("tab_close", {});
+      assert.equal(refused.isError, true);
+      assert.match(textOf(refused), /The tab was not closed: it has unsaved changes/);
       assert.match(textOf(await call("tabs")), /\(active\) Dirty Page/);
       await call("tab_new", { url: `${base}/second` });
       const tabs = textOf(await call("tabs"));
@@ -881,6 +901,65 @@ async function main() {
       await call("click", { selector: "#f" });
       const closed = textOf(await call("tab_close", { force: true }));
       assert.match(closed, /^Tab closed\. Switched to: /);
+    });
+
+    await test("the agent's own submit leaves a page with unsaved changes", async () => {
+      await call("navigate", { url: `${base}/dirty` });
+      await call("click", { selector: "#f" });
+      await call("type", { selector: "#f", text: "edited" });
+      const submitted = textOf(await call("click", { selector: "#submit-dirty" }));
+      assert.match(submitted, /^Page: Submitted/m);
+      assert.match(submitted, /q=edited/);
+      assert.match(submitted, /Note: The page asked to confirm leaving because it has unsaved changes; the prompt was accepted/);
+
+      await call("navigate", { url: `${base}/dirty` });
+      await call("click", { selector: "#f" });
+      const entered = textOf(await call("type", { selector: "#f", text: "via enter", pressEnter: true }));
+      assert.match(entered, /^Page: Submitted/m);
+      assert.match(entered, /q=via enter/);
+    });
+
+    await test("decorative aria-hidden elements do not trigger a note", async () => {
+      const out = textOf(await call("navigate", { url: `${base}/decorated` }));
+      assert.doesNotMatch(out, /^Note:/m);
+      assert.match(out, /\[\d+\] link "Visible link"/);
+    });
+
+    await test("an open native modal dialog is listed first", async () => {
+      const out = textOf(await call("navigate", { url: `${base}/modal` }));
+      assert.match(out, /^Note: A modal dialog \("Consent"\) is open and listed first/m);
+      const body = out.slice(out.indexOf("URL: ")).split("\n").slice(2);
+      assert.match(body[0], /^\[\d+\] dialog "Consent" modal/);
+      assert.match(out, /\[\d+\] button "Accept all"/);
+      assert.doesNotMatch(out, /link "Body link"/);
+      const closed = textOf(await call("click", { selector: "#accept-cookies" }));
+      assert.match(closed, /link "Body link"/);
+    });
+
+    await test("an aria-modal dialog over inert content is listed first", async () => {
+      const out = textOf(await call("navigate", { url: `${base}/consent` }));
+      assert.match(out, /^Note: A modal dialog \("Privacy"\) is open and listed first/m);
+      assert.match(out, /\[\d+\] dialog "Privacy" modal/);
+      assert.doesNotMatch(out, /link "Story link"/);
+      const agreed = textOf(await call("click", { selector: "#agree" }));
+      assert.match(agreed, /link "Story link"/);
+    });
+
+    await test("batch returns step results in full and can skip the page", async () => {
+      await call("navigate", { url: `${base}/` });
+      const out = textOf(
+        await call("batch", {
+          snapshot: false,
+          steps: [
+            { tool: "evaluate", args: { expression: "'x'.repeat(5000)" } },
+            { tool: "click", args: { selector: "#confirm-btn" } },
+          ],
+        })
+      );
+      assert.ok(out.includes("x".repeat(5000)), "evaluate output was cut");
+      assert.doesNotMatch(out, /^Page: /m);
+      assert.doesNotMatch(out, /Changes since/);
+      assert.match(out, /^Note: A JavaScript confirm dialog/m);
     });
 
     await test("batch runs several steps and returns the page once", async () => {
@@ -895,7 +974,7 @@ async function main() {
         })
       );
       assert.match(out, /^Batch: all 3 steps completed\./m);
-      assert.match(out, /^3\. evaluate .* ok: 3$/m);
+      assert.match(out, /^3\. evaluate .* ok:\n3$/m);
       assert.match(out, /^\+ \[\d+\] textbox "Query" value="batched"/m);
       assert.match(out, /^\+ text "Button was clicked"/m);
     });

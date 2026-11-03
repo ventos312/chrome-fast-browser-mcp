@@ -46,7 +46,7 @@ import {
 import { waitToolDef, handleWait } from "./tools/wait.js";
 import { createBatchTool } from "./tools/batch.js";
 
-const VERSION = "1.2.0";
+const VERSION = "1.3.0";
 
 // Sent to MCP clients on connect, so the agent driving the browser knows how
 // the tools fit together and what the setup looks like.
@@ -62,11 +62,13 @@ const INSTRUCTIONS = [
     "get_page when you need the whole page; long pages are cut at an output limit, and get_page with " +
     "offset continues where it stopped.",
   "Use batch to run several steps in one call, for example type, type, click; it stops at the first " +
-    "failing step and returns the page once.",
+    "failing step, returns each step's own output (evaluate results in full) and the page once; pass " +
+    "snapshot: false when you only need the step outputs.",
   "Prefer get_page over screenshot, and use screenshot only when layout matters. Use evaluate for " +
     "anything the other tools cannot express; it behaves like the DevTools console.",
-  "A page with unsaved changes is never left silently: navigate and tab_close cancel and report " +
-    "instead, and take force: true to proceed. Open a fresh tab with tab_new when in doubt.",
+  "A page with unsaved changes is never left silently by navigate or tab_close: they fail with an " +
+    "explanation and take force: true to proceed (or open a fresh tab with tab_new). Your own clicks, " +
+    "Enter and form submits on that page go through even if the page asks to confirm.",
   `Setup: this server talks to Chrome on 127.0.0.1:${CHROME_PORT}` +
     (AUTO_LAUNCH
       ? " and launches Chrome itself when nothing is listening there."
