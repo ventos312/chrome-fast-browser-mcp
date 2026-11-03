@@ -8,12 +8,23 @@ export const getPageToolDef = {
   description:
     "Get the current page content. The default is an accessibility tree with the page text and " +
     'numbered element refs you can pass to click/type; "interactive" leaves out the text lines for a ' +
-    'compact view; "html" returns the raw HTML.',
+    'compact view; "dom" reads the DOM directly (for pages whose accessibility tree is hidden by a ' +
+    'modal); "html" returns the raw HTML. Long pages are cut at an output limit; continue with offset.',
   schema: {
     format: z
-      .enum(["accessibility", "interactive", "html"])
+      .enum(["accessibility", "interactive", "dom", "html"])
       .optional()
       .describe("Output format (default: accessibility)"),
+    offset: z
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe("Skip this many content lines; use the value a truncated snapshot suggests to continue"),
+    expandMenus: z
+      .boolean()
+      .optional()
+      .describe("List every link inside long navigation menus, which are shortened by default"),
   },
 };
 
@@ -49,7 +60,11 @@ export const evaluateToolDef = {
   },
 };
 
-export async function handleGetPage(args: { format?: string }): Promise<string> {
+export async function handleGetPage(args: {
+  format?: string;
+  offset?: number;
+  expandMenus?: boolean;
+}): Promise<string> {
   if (args.format === "html") {
     const client = await getClient();
     const { result, exceptionDetails } = await client.Runtime.evaluate({
@@ -59,7 +74,11 @@ export async function handleGetPage(args: { format?: string }): Promise<string> 
     if (exceptionDetails) throw new Error(describeException(exceptionDetails));
     return String(result.value ?? "");
   }
-  return getAccessibilityTree((args.format as SnapshotFormat) || "accessibility");
+  return getAccessibilityTree({
+    format: (args.format as SnapshotFormat) || "accessibility",
+    offset: args.offset,
+    expandMenus: args.expandMenus,
+  });
 }
 
 const MAX_DIMENSION = 7680; // the Claude API rejects images over 8000px on a side

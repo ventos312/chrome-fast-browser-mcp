@@ -52,11 +52,14 @@ const homePage = `<!doctype html><html><head><meta charset="utf-8"><title>Fixtur
 <button id="alert-btn" onclick="alert('Hello'); document.getElementById('alert-result').textContent='after alert'">Alert</button>
 <span id="alert-result"></span>
 <button id="delayed-btn" onclick="setTimeout(() => { const d = document.createElement('div'); d.id='delayed'; d.textContent='Delayed content arrived'; document.body.appendChild(d); }, 600)">Add delayed</button>
+<button id="ajax" onclick="fetch('/slow-json').then(r => r.json()).then(j => { document.getElementById('ajax-result').textContent = j.msg })">Save via ajax</button>
+<span id="ajax-result"></span>
 <div class="spacer"></div>
 <button id="far" onclick="document.getElementById('far-result').textContent='far clicked'">Far down button</button>
 <span id="far-result"></span>
 <a id="hash-link" href="#bottom">Jump to bottom</a>
 <div id="bottom"></div>
+<section id="filler">${Array.from({ length: 30 }, (_, i) => `<p>Filler paragraph ${i + 1} keeps this fixture above the small-page threshold so actions report changes.</p>`).join("")}</section>
 <script>
   // Mimic React's value tracking: it shadows the value property on the instance,
   // so a plain "el.value = x" followed by an input event looks like no change.
@@ -85,6 +88,29 @@ const routes = {
   "/second": () => [200, secondPage],
   "/tall": () => [200, tallPage],
   "/missing": () => [404, `<!doctype html><html><head><title>Not Found</title></head><body><h1>Nope</h1></body></html>`],
+  "/menu": () => [
+    200,
+    `<!doctype html><html><head><title>Menu Page</title></head><body><nav aria-label="Main menu">${Array.from(
+      { length: 40 },
+      (_, i) => `<a href="#i${i + 1}">Item ${i + 1}</a>`
+    ).join(" ")}</nav><h1>Menu page</h1><p>Content after the menu</p></body></html>`,
+  ],
+  "/long": () => [
+    200,
+    `<!doctype html><html><head><title>Long Page</title></head><body><h1>Long page</h1>${Array.from(
+      { length: 400 },
+      (_, i) => `<p>Paragraph ${i + 1}: ${"lorem ipsum dolor sit amet ".repeat(3)}</p>`
+    ).join("")}<a href="/second">Bottom link</a></body></html>`,
+  ],
+  // Everything hidden from assistive technology, as some sites leave their page after a modal closed
+  "/hidden": () => [
+    200,
+    `<!doctype html><html><head><title>Hidden Page</title></head><body><div aria-hidden="true"><h1>Hidden from AT</h1><p>Body text</p><a id="hl" href="/second">Hidden link</a><button id="hb" onclick="this.textContent='hb clicked'">Hidden button</button></div><div role="dialog" aria-modal="true" style="position:fixed;opacity:0;width:1px;height:1px"></div></body></html>`,
+  ],
+  "/dirty": () => [
+    200,
+    `<!doctype html><html><head><title>Dirty Page</title></head><body><h1>Dirty</h1><input id="f" value=""><a id="away" href="/second">Leave</a><script>window.addEventListener('beforeunload', (e) => { e.preventDefault(); e.returnValue = ''; });</script></body></html>`,
+  ],
   "/submitted": (url) => {
     const q = url.searchParams;
     return [
@@ -103,6 +129,13 @@ function startFixtureServer() {
           res.writeHead(200, { "Content-Type": "text/html" });
           res.end(`<!doctype html><html><head><title>Slow</title></head><body><p>Slow page</p></body></html>`);
         }, 1200);
+        return;
+      }
+      if (url.pathname === "/slow-json") {
+        setTimeout(() => {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ msg: "saved via ajax" }));
+        }, 300);
         return;
       }
       const route = routes[url.pathname];
@@ -337,7 +370,12 @@ async function runStdioShutdownTest(chromePort) {
       // Attach to Chrome so an open WebSocket is keeping the event loop alive
       send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "tabs", arguments: {} } });
       const tabs = await awaitResponse(2);
-      assert.match(tabs.result.content[0].text, /\(active\)/);
+      const listing = tabs.result.content[0].text;
+      assert.match(listing, /\(active\)/);
+      // A fresh server prefers an empty tab over one left mid-task
+      const lines = listing.split("\n");
+      const activeIndex = lines.findIndex((l) => l.includes("(active)"));
+      assert.match(lines[activeIndex + 1], /about:blank/, `expected the blank tab to be chosen:\n${listing}`);
 
       proc.stdin.end();
       const code = await waitForExit(proc, 5000);
@@ -404,7 +442,7 @@ async function main() {
       const { tools } = await client.listTools();
       const names = tools.map((t) => t.name).sort();
       assert.deepEqual(names, [
-        "click", "evaluate", "fill_form", "get_page", "navigate", "screenshot", "scroll",
+        "batch", "click", "evaluate", "fill_form", "get_page", "navigate", "screenshot", "scroll",
         "tab_close", "tab_new", "tab_switch", "tabs", "type", "wait",
       ]);
       const click = tools.find((t) => t.name === "click");
@@ -752,7 +790,146 @@ async function main() {
       assert.match(textOf(result), /No tab with target ID/);
     });
 
+    await test("closed select lists a count instead of its options", async () => {
+      const out = textOf(await call("navigate", { url: `${base}/` }));
+      assert.match(out, /\[\d+\] combobox value="Red" collapsed \(3 options\)/);
+      assert.doesNotMatch(out, /option "Red"/);
+    });
+
+    await test("refs stay stable while the page changes", async () => {
+      const before = textOf(await call("navigate", { url: `${base}/` }));
+      const showRef = refOf(before, 'button "Show message"');
+      await call("click", { selector: "#delayed-btn" });
+      await call("wait", { selector: "#delayed", timeout: 3000 });
+      const after = textOf(await call("get_page"));
+      assert.equal(refOf(after, 'button "Show message"'), showRef);
+      assert.match(after, /text "Delayed content arrived"/);
+    });
+
+    await test("actions report what changed instead of the whole page", async () => {
+      await call("navigate", { url: `${base}/` });
+      const typed = textOf(await call("type", { selector: "#q", text: "changed", clear: true }));
+      assert.match(typed, /^Changes since the previous snapshot/m);
+      assert.match(typed, /^- \[\d+\] textbox "Query" value="old"/m);
+      assert.match(typed, /^\+ \[\d+\] textbox "Query" value="changed"/m);
+      assert.doesNotMatch(typed, /text "Welcome to the fixture page/);
+      const scrolled = textOf(await call("scroll", { direction: "down", amount: 100 }));
+      assert.match(scrolled, /No visible change on the page/);
+    });
+
+    await test("click reports background requests it triggered", async () => {
+      await call("navigate", { url: `${base}/` });
+      const out = textOf(await call("click", { selector: "#ajax" }));
+      assert.match(out, /Note: No navigation; 1 background request finished: GET \/slow-json → 200\./);
+      assert.match(out, /^\+ text "saved via ajax"/m);
+    });
+
+    await test("long navigation menus are shortened unless expanded", async () => {
+      const out = textOf(await call("navigate", { url: `${base}/menu` }));
+      assert.equal((out.match(/link "Item \d+"/g) || []).length, 10);
+      assert.match(out, /… 30 more links in navigation "Main menu" not shown/);
+      assert.match(out, /heading "Menu page"/);
+      const full = textOf(await call("get_page", { expandMenus: true }));
+      assert.equal((full.match(/link "Item \d+"/g) || []).length, 40);
+    });
+
+    await test("long pages are cut at the output limit and continue with offset", async () => {
+      const first = textOf(await call("navigate", { url: `${base}/long` }));
+      assert.ok(first.length < 22_000, `first chunk is ${first.length} chars`);
+      const note = first.match(/… (\d+) more lines not shown .* offset: (\d+) to continue/);
+      assert.ok(note, `no truncation note in:\n${first.slice(-300)}`);
+      const next = textOf(await call("get_page", { offset: Number(note[2]) }));
+      assert.match(next, new RegExp(`^\\(continuing at line ${note[2]} of`, "m"));
+      assert.doesNotMatch(next, /text "Paragraph 1:/);
+      assert.match(next, /text "Paragraph \d+:/);
+    });
+
+    await test("falls back to the DOM when the accessibility tree is hidden", async () => {
+      const out = textOf(await call("navigate", { url: `${base}/hidden` }));
+      assert.match(out, /Note: The accessibility tree is empty: .*This snapshot was built from the DOM instead\./);
+      assert.match(out, /\[\d+\] heading "Hidden from AT" level=1/);
+      assert.match(out, /text "Body text"/);
+      assert.match(out, /\[\d+\] link "Hidden link"/);
+      const ref = refOf(out, 'button "Hidden button"');
+      const clicked = textOf(await call("click", { selector: ref }));
+      assert.match(clicked, /button "hb clicked"/);
+      const dom = textOf(await call("get_page", { format: "dom" }));
+      assert.match(dom, /\[\d+\] link "Hidden link"/);
+    });
+
+    await test("navigating away from unsaved changes is cancelled unless forced", async () => {
+      await call("navigate", { url: `${base}/dirty` });
+      // A real click gives the page the user activation it needs to show the prompt
+      await call("click", { selector: "#f" });
+      const refused = textOf(await call("navigate", { url: `${base}/second` }));
+      assert.match(refused, /Note: The page has unsaved changes and asked to confirm leaving/);
+      assert.match(refused, /^Page: Dirty Page/m);
+      const forced = textOf(await call("navigate", { url: `${base}/second`, force: true }));
+      assert.match(forced, /^Page: Second Page/m);
+    });
+
+    await test("tab_close keeps a tab with unsaved changes unless forced", async () => {
+      await call("navigate", { url: `${base}/dirty` });
+      await call("click", { selector: "#f" });
+      const refused = textOf(await call("tab_close", {}));
+      assert.match(refused, /The tab was not closed: it has unsaved changes/);
+      assert.match(textOf(await call("tabs")), /\(active\) Dirty Page/);
+      await call("tab_new", { url: `${base}/second` });
+      const tabs = textOf(await call("tabs"));
+      const dirtyId = tabs.split("\n").find((l) => l.includes("Dirty Page")).match(/^\[([^\]]+)\]/)[1];
+      await call("tab_switch", { targetId: dirtyId });
+      await call("click", { selector: "#f" });
+      const closed = textOf(await call("tab_close", { force: true }));
+      assert.match(closed, /^Tab closed\. Switched to: /);
+    });
+
+    await test("batch runs several steps and returns the page once", async () => {
+      await call("navigate", { url: `${base}/` });
+      const out = textOf(
+        await call("batch", {
+          steps: [
+            { tool: "type", args: { selector: "#q", text: "batched", clear: true } },
+            { tool: "click", args: { selector: "#show" } },
+            { tool: "evaluate", args: { expression: "1 + 2" } },
+          ],
+        })
+      );
+      assert.match(out, /^Batch: all 3 steps completed\./m);
+      assert.match(out, /^3\. evaluate .* ok: 3$/m);
+      assert.match(out, /^\+ \[\d+\] textbox "Query" value="batched"/m);
+      assert.match(out, /^\+ text "Button was clicked"/m);
+    });
+
+    await test("batch stops at the first failing step", async () => {
+      const result = await call("batch", {
+        steps: [
+          { tool: "click", args: { selector: "#show" } },
+          { tool: "click", args: { selector: "#does-not-exist" } },
+          { tool: "click", args: { selector: "#show" } },
+        ],
+      });
+      assert.equal(result.isError, true);
+      assert.match(textOf(result), /Batch stopped: step 2 \(click\) failed: .*No element found/);
+      assert.match(textOf(result), /1 of 3 steps completed/);
+    });
+
+    await test("batch validates step arguments and returns a full page after navigation", async () => {
+      const bad = await call("batch", { steps: [{ tool: "navigate", args: {} }] });
+      assert.equal(bad.isError, true);
+      assert.match(textOf(bad), /step 1 \(navigate\) has invalid arguments/);
+      const out = textOf(await call("batch", { steps: [{ tool: "navigate", args: { url: `${base}/second` } }] }));
+      assert.match(out, /^Page: Second Page/m);
+      assert.match(out, /text "You made it to the second page\."/);
+    });
+
     await runHttpTests(port);
+
+    // Leave a blank tab next to a content tab, with the content tab active, so
+    // the fresh server below has to choose.
+    await call("tab_new", {});
+    const tabsNow = textOf(await call("tabs"));
+    const contentId = tabsNow.split("\n").find((l) => l.includes("Second Page")).match(/^\[([^\]]+)\]/)[1];
+    await call("tab_switch", { targetId: contentId });
     await runStdioShutdownTest(port);
   } finally {
     try {

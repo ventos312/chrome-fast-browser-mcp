@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.2.0
+
+Driven by a benchmark against real sites (WordPress admin, CNN, Wikipedia).
+
+### Changed
+- Actions (`click`, `type`, `fill_form`, `scroll`, `wait`) return what changed on the page instead of
+  the whole page: `+`/`-` lines, or "No visible change". Element refs are now stable for the life of
+  a page, which makes those reports safe to act on. Small pages and large changes still come in full.
+- Snapshots are cut at `CHROME_FAST_MAX_CHARS` characters (default 20000) instead of a line count, and
+  `get_page` takes `offset` to continue. Closed `<select>` elements show a value and an option count
+  instead of every option; navigation menus with more than 25 links show the first 10 unless
+  `expandMenus: true`.
+- `beforeunload` prompts are no longer accepted automatically. `navigate` and `tab_close` cancel,
+  report that the page has unsaved changes, and take `force: true` to proceed.
+- A fresh server prefers an empty tab over one another session left mid-task.
+
+### Added
+- `batch` tool: several steps in one call, stopping at the first failing step, with one page report.
+- Snapshot built from the DOM when an open modal or `aria-hidden`/`inert` markup leaves the
+  accessibility tree empty (some sites leave their page like that), and `get_page` with
+  `format: "dom"` on request.
+- After an action with no navigation, the background requests it triggered are awaited (up to 3 s) and
+  reported, so an AJAX save reads as `POST /wp-admin/admin-ajax.php → 200` rather than "nothing happened".
+
 ## 1.1.0
 
 ### Changed
@@ -29,6 +53,7 @@
   of blocking every tool, and reported as a `Note:` line.
 - End-to-end test suite (`npm test`) against a headless Chrome.
 - `zod` declared as a direct dependency; `bin` and `engines` fields.
+- `CHROME_FAST_MAX_LINES` limit on snapshot length (replaced by `CHROME_FAST_MAX_CHARS` in 1.2.0).
 
 ### Fixed
 - The attached tab was never tracked after the first connection, so `tabs` never showed `(active)`

@@ -3,13 +3,11 @@ import {
   listTargets,
   newTarget,
   connectToTarget,
-  closeTarget,
-  disconnectClient,
+  closeTab,
   getActiveTargetId,
   getClient,
 } from "../cdp.js";
 import { getAccessibilityTree } from "../utils/accessibility.js";
-import { sleep } from "../utils/waits.js";
 import { handleNavigate } from "./navigate.js";
 
 export const tabsToolDef = {
@@ -45,6 +43,12 @@ export const tabCloseToolDef = {
     "attaches to another open tab.",
   schema: {
     targetId: z.string().optional().describe("Target ID of the tab to close (default: current tab)"),
+    force: z
+      .boolean()
+      .optional()
+      .describe(
+        "Close the tab even if it has unsaved changes that it asks to confirm (default: false, which keeps it open and reports that)"
+      ),
   },
 };
 
@@ -80,7 +84,7 @@ export async function handleTabSwitch(args: { targetId: string }): Promise<strin
   return getAccessibilityTree();
 }
 
-export async function handleTabClose(args: { targetId?: string }): Promise<string> {
+export async function handleTabClose(args: { targetId?: string; force?: boolean }): Promise<string> {
   const current = getActiveTargetId();
   const targetId = args.targetId || current;
   if (!targetId) {
@@ -93,31 +97,28 @@ export async function handleTabClose(args: { targetId?: string }): Promise<strin
   }
 
   const closedCurrent = targetId === current;
-  await closeTarget(targetId);
-  if (closedCurrent) await disconnectClient();
+  const remaining = pages.filter((t) => t.id !== targetId);
+
+  if ((await closeTab(targetId, !!args.force)) === "kept") return notClosed(closedCurrent);
 
   // Closing a tab that is not the current one must not change which tab the
   // other tools act on.
   if (!closedCurrent) return "Tab closed. Still attached to the current tab.";
-
-  let remaining = pages.filter((t) => t.id !== targetId);
   if (remaining.length === 0) {
     return "Tab closed. No tabs remain open; Chrome may have exited. The next tool call reconnects or relaunches it.";
   }
 
-  // Chrome acknowledges the close before the tab is gone; wait for it to disappear.
-  for (let i = 0; i < 20; i++) {
-    const now = pageTargets(await listTargets());
-    if (!now.some((t) => t.id === targetId)) {
-      remaining = now.length > 0 ? now : remaining;
-      break;
-    }
-    await sleep(50);
-  }
+  const now = pageTargets(await listTargets());
+  const next = now.find((t) => t.id !== targetId) ?? remaining[0];
+  await connectToTarget(next.id);
+  return `Tab closed. Switched to: ${next.title || next.url}\n\n` + (await getAccessibilityTree());
+}
 
-  await connectToTarget(remaining[0].id);
+function notClosed(wasCurrent: boolean): string {
   return (
-    `Tab closed. Switched to: ${remaining[0].title || remaining[0].url}\n\n` +
-    (await getAccessibilityTree())
+    "The tab was not closed: it has unsaved changes and asked to confirm. Save them first, or " +
+    (wasCurrent
+      ? "repeat with force: true to close it anyway."
+      : "switch to it with tab_switch and close it with force: true.")
   );
 }

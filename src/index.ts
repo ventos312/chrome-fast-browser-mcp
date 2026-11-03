@@ -44,20 +44,29 @@ import {
   handleTabClose,
 } from "./tools/tabs.js";
 import { waitToolDef, handleWait } from "./tools/wait.js";
+import { createBatchTool } from "./tools/batch.js";
 
-const VERSION = "1.1.0";
+const VERSION = "1.2.0";
 
 // Sent to MCP clients on connect, so the agent driving the browser knows how
 // the tools fit together and what the setup looks like.
 const INSTRUCTIONS = [
   "chrome-fast drives a real, logged-in Chrome through the DevTools protocol.",
-  "Start with navigate or get_page. Both return the page as an accessibility tree whose numbered " +
-    'refs (pass them as strings, e.g. "12") go to click, type, scroll and fill_form. Refs go stale ' +
-    "when the page changes; if a tool says so, call get_page again.",
+  "Start with navigate or get_page. Both return the page as an accessibility tree: text lines, " +
+    "headings, and interactive elements with numbered refs (pass them as strings, e.g. \"12\") that " +
+    "click, type, scroll and fill_form accept. A ref keeps its number for as long as you stay on the " +
+    "same page; if a tool reports a stale ref, call get_page again.",
+  "After an action (click, type, fill_form, scroll, wait) you get what changed on the page: lines " +
+    "marked + (new) and - (gone), or \"No visible change\". A Note tells you when a navigation " +
+    "started, which background requests the action triggered, or when a dialog was handled. Call " +
+    "get_page when you need the whole page; long pages are cut at an output limit, and get_page with " +
+    "offset continues where it stopped.",
+  "Use batch to run several steps in one call, for example type, type, click; it stops at the first " +
+    "failing step and returns the page once.",
   "Prefer get_page over screenshot, and use screenshot only when layout matters. Use evaluate for " +
     "anything the other tools cannot express; it behaves like the DevTools console.",
-  'Lines starting with "Note:" report things handled automatically, such as dismissed dialogs or a ' +
-    "page that did not finish loading in time.",
+  "A page with unsaved changes is never left silently: navigate and tab_close cancel and report " +
+    "instead, and take force: true to proceed. Open a fresh tab with tab_new when in doubt.",
   `Setup: this server talks to Chrome on 127.0.0.1:${CHROME_PORT}` +
     (AUTO_LAUNCH
       ? " and launches Chrome itself when nothing is listening there."
@@ -157,6 +166,22 @@ function createServer(): McpServer {
   registerTextTool(server, tabSwitchToolDef, handleTabSwitch);
   registerTextTool(server, tabCloseToolDef, handleTabClose, { destructiveHint: true });
   registerTextTool(server, waitToolDef, handleWait, { readOnlyHint: true });
+
+  const batch = createBatchTool([
+    { ...navigateToolDef, handler: handleNavigate },
+    { ...getPageToolDef, handler: handleGetPage },
+    { ...evaluateToolDef, handler: handleEvaluate },
+    { ...clickToolDef, handler: handleClick },
+    { ...typeToolDef, handler: handleType },
+    { ...scrollToolDef, handler: handleScroll },
+    { ...fillFormToolDef, handler: handleFillForm },
+    { ...tabsToolDef, handler: handleTabs },
+    { ...tabNewToolDef, handler: handleTabNew },
+    { ...tabSwitchToolDef, handler: handleTabSwitch },
+    { ...tabCloseToolDef, handler: handleTabClose },
+    { ...waitToolDef, handler: handleWait },
+  ]);
+  registerTextTool(server, batch.def, batch.handler);
 
   return server;
 }

@@ -1,8 +1,8 @@
 import { z } from "zod";
 import { addNote, getClient } from "../cdp.js";
-import { getAccessibilityTree } from "../utils/accessibility.js";
+import { getPageUpdate } from "../utils/accessibility.js";
 import { resolveElement, getClickPoint } from "../utils/selectors.js";
-import { pressKey, settleAfterAction, sleep } from "../utils/waits.js";
+import { beginSettle, pressKey, sleep } from "../utils/waits.js";
 
 const selectorField = (what: string) =>
   z.string().describe(`${what}: a ref number from get_page/navigate (e.g. "3") or a CSS selector`);
@@ -93,6 +93,7 @@ export async function handleClick(args: {
   const resolved = await resolveElement(args.selector);
   const { x, y } = await getClickPoint(resolved);
   const button = args.button || "left";
+  const settle = await beginSettle(client);
 
   // Check that the point lands on the element and not on something covering it
   // (a modal, a cookie banner, a sticky header); otherwise the click would go
@@ -141,8 +142,8 @@ export async function handleClick(args: {
     );
   }
 
-  addNote(await settleAfterAction(client));
-  return getAccessibilityTree();
+  addNote(await settle.finish());
+  return getPageUpdate();
 }
 
 // Select the whole content of a field. Works for inputs, textareas and
@@ -207,15 +208,16 @@ export async function handleType(args: {
   if (args.text) await client.Input.insertText({ text: args.text });
 
   if (args.pressEnter) {
+    const settle = await beginSettle(client);
     // The "\r" text is what makes Chrome deliver a keypress; without it forms
     // are not submitted.
     await pressKey(client, "Enter", 13, "\r");
-    addNote(await settleAfterAction(client));
+    addNote(await settle.finish());
   } else {
     await sleep(100);
   }
 
-  return getAccessibilityTree();
+  return getPageUpdate();
 }
 
 export async function handleScroll(args: {
@@ -241,7 +243,7 @@ export async function handleScroll(args: {
 
   // Pages that load content lazily render it after the scroll; give them a moment.
   await sleep(200);
-  return getAccessibilityTree();
+  return getPageUpdate();
 }
 
 // Set a form control's value the way a user would have, so that frameworks
@@ -315,6 +317,7 @@ export async function handleFillForm(args: {
   if (args.submit) {
     const last = args.fields[args.fields.length - 1];
     const resolved = await resolveElement(last.selector);
+    const settle = await beginSettle(client);
     const { result, exceptionDetails } = await client.Runtime.callFunctionOn({
       objectId: resolved.objectId,
       // requestSubmit runs validation and submit handlers like a real submit
@@ -330,7 +333,7 @@ export async function handleFillForm(args: {
     });
     if (exceptionDetails) throw new Error(`Could not submit the form: ${firstLine(exceptionDetails)}`);
     if (result?.value) {
-      addNote(await settleAfterAction(client));
+      addNote(await settle.finish());
     } else {
       addNote(
         `The fields were filled, but "${last.selector}" is not inside a <form>, so nothing was submitted. Click the submit button instead.`
@@ -338,5 +341,5 @@ export async function handleFillForm(args: {
     }
   }
 
-  return getAccessibilityTree();
+  return getPageUpdate();
 }

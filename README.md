@@ -34,7 +34,7 @@ Environment variables (all optional):
 | `CHROME_PATH` | auto-detected | Path to `chrome.exe` if it is somewhere unusual |
 | `CHROME_AUTO_LAUNCH` | `1` | Set to `0` to disable auto-launch and require the bat |
 | `CHROME_DEBUG_ADDRESS` | `127.0.0.1` | Address Chrome's DevTools port listens on. The protocol has no authentication and gives full control of the logged-in profile, so keep it on loopback unless a container or another machine must reach Chrome directly (the HTTP mode below does not need that). |
-| `CHROME_FAST_MAX_LINES` | `2000` | Maximum content lines in a page snapshot before the rest is omitted |
+| `CHROME_FAST_MAX_CHARS` | `20000` | Characters of page content per snapshot before the rest is omitted (`get_page` with `offset` continues) |
 | `MCP_HTTP_PORT` | unset | Run the HTTP server on this port instead of stdio (same as `--http <port>`) |
 | `MCP_HTTP_HOST` | `0.0.0.0` | Address the HTTP server binds to |
 | `MCP_HTTP_TOKEN` | unset | If set, HTTP clients must send `Authorization: Bearer <token>` |
@@ -98,18 +98,34 @@ The end-to-end test launches a headless Chrome with a throwaway profile, serves 
 exercises every tool. It needs Chrome installed (or `CHROME_PATH` set).
 
 ## Tools provided
-- `navigate` (`url`, `waitUntil`: load / domcontentloaded / networkidle, `timeout`)
-- `tabs`, `tab_new`, `tab_switch`, `tab_close`
-- `get_page` (`format`: `accessibility` with page text, `interactive` without text, or `html`), `screenshot`, `evaluate`
+- `navigate` (`url`, `waitUntil`: load / domcontentloaded / networkidle, `timeout`, `force`)
+- `tabs`, `tab_new`, `tab_switch`, `tab_close` (`force`)
+- `get_page` (`format`: `accessibility` with page text, `interactive` without text, `dom` read from the
+  DOM, or `html`; `offset` to continue a cut snapshot; `expandMenus` to list long navigation menus),
+  `screenshot`, `evaluate`
 - `click`, `type`, `scroll`, `fill_form`
 - `wait` (CSS selector, text on the page, network idle, or a fixed time)
+- `batch` (several of the above in one call; stops at the first failing step and returns the page once)
 
 ## Notes for drivers
-- Element refs returned by `get_page` / `navigate` / `click` / `type` are plain numbers (pass `"55"`).
-  They go stale when the page re-renders; if a tool reports a stale ref, call `get_page` again.
+- Element refs are plain numbers (pass `"55"`). An element keeps its number for as long as you stay on
+  the same page, even as other things change; a ref only goes stale when its element is gone, and the
+  tool says so. Refs reset on navigation and tab switches.
 - Snapshots list the page text as `text "…"` lines, headings with their level, and form fields with
-  their current `value="…"`. Lines starting with `Note:` report things handled automatically, for
-  example a dismissed `confirm()` dialog or a page that did not finish loading in time.
+  their current `value="…"`. Closed `<select>` elements show their value and an option count instead
+  of every option; navigation menus with more than 25 links show the first 10 (`expandMenus: true`
+  lists them all). Lines starting with `Note:` report things handled automatically, for example a
+  dismissed `confirm()` dialog or a page that did not finish loading in time.
+- Actions (`click`, `type`, `fill_form`, `scroll`, `wait`) return what changed since the previous
+  snapshot: `+` lines are new, `-` lines are gone, or "No visible change". A `Note:` reports a
+  navigation that started or the background requests the action triggered, so an AJAX save is
+  visible as `POST /wp-admin/admin-ajax.php → 200`. Small pages and large changes come back in full.
+- Long pages are cut at `CHROME_FAST_MAX_CHARS` characters; the last line says which `offset` to pass
+  to `get_page` to continue.
+- When an open modal or `aria-hidden`/`inert` markup leaves the accessibility tree empty, the snapshot
+  is built from the DOM instead and says so; `get_page` with `format: "dom"` does that on request.
+- A page with unsaved changes is never left silently: `navigate` and `tab_close` cancel, report, and
+  take `force: true` to proceed. A fresh server attaches to an empty tab when one exists.
 - `click` scrolls the element into view first. If another element covers it, a DOM `click()` is
   dispatched instead and a note says so. When a click starts a navigation, the new page is returned.
 - `type` appends to the existing content; use `clear: true` to replace it. `pressEnter: true` submits

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { addNote, getClient } from "../cdp.js";
-import { getAccessibilityTree } from "../utils/accessibility.js";
+import { getPageUpdate } from "../utils/accessibility.js";
 import { sleep, waitForNetworkIdle } from "../utils/waits.js";
 
 export const waitToolDef = {
@@ -98,5 +98,5 @@ export async function handleWait(args: {
     }
   }
 
-  return getAccessibilityTree();
+  return getPageUpdate();
 }

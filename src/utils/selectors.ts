@@ -21,12 +21,28 @@ export async function resolveElement(selector: string): Promise<ResolvedNode> {
 
   if (isRef(selector)) {
     const refNum = parseInt(selector, 10);
-    const backendNodeId = getRefMap().get(refNum);
-    if (!backendNodeId) {
+    const target = getRefMap().get(refNum);
+    if (target === undefined) {
       throw new Error(
         `Ref [${refNum}] not found. Run get_page first to refresh element refs.`
       );
     }
+    if (typeof target === "string") {
+      // A ref from a snapshot built from the DOM: locate the element by XPath.
+      const xpath = target.replace(/^xpath:/, "");
+      const { result } = await client.Runtime.evaluate({
+        expression: `document.evaluate(${JSON.stringify(xpath)}, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue`,
+        returnByValue: false,
+      });
+      if (!result?.objectId) {
+        throw new Error(
+          `Ref [${refNum}] is stale: that element is no longer in the page. Run get_page to refresh element refs.`
+        );
+      }
+      const { node } = await client.DOM.describeNode({ objectId: result.objectId });
+      return { backendNodeId: node.backendNodeId, objectId: result.objectId };
+    }
+    const backendNodeId = target;
     try {
       const { object } = await client.DOM.resolveNode({ backendNodeId });
       return { backendNodeId, objectId: object.objectId };

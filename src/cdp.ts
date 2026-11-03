@@ -55,6 +55,40 @@ let connectPromise: Promise<CDPClient> | null = null;
 let launchPromise: Promise<void> | null = null;
 
 /**
+ * Increases whenever the attached tab shows a new document (a navigation to a
+ * new page, or a switch to another tab). Element refs are scoped to it.
+ */
+let documentEpoch = 0;
+export function getDocumentEpoch(): number {
+  return documentEpoch;
+}
+
+/** When true, beforeunload prompts are accepted (navigate / tab_close with force: true). */
+let forceUnload = false;
+export function setForceUnload(value: boolean): void {
+  forceUnload = value;
+}
+
+let unloadCancelCount = 0;
+/** How many times an action was cancelled because the page asked to confirm leaving. */
+export function getUnloadCancelCount(): number {
+  return unloadCancelCount;
+}
+
+/** Emitted on the client when a beforeunload prompt cancelled a navigation. */
+export const UNLOAD_CANCELLED_EVENT = "chrome-fast:unloadCancelled";
+
+/** An empty tab that can be taken over without disturbing anything. */
+export function isBlankTab(url: string): boolean {
+  return (
+    url === "about:blank" ||
+    url.startsWith("chrome://newtab") ||
+    url.startsWith("chrome://new-tab-page") ||
+    url.includes("/_/chrome/newtab")
+  );
+}
+
+/**
  * Things that were handled automatically (dismissed dialogs, timeouts) and
  * that the caller should know about. They are drained into the next page
  * snapshot so the agent sees them next to the content they affected.
@@ -182,21 +216,17 @@ async function setupClient(c: CDPClient, targetId: string): Promise<CDPClient> {
     // Lifecycle events carry frame and loader IDs, which lets a wait target one
     // specific navigation instead of racing on a global "load" event.
     c.Page.setLifecycleEventsEnabled({ enabled: true }),
+    // Network events let actions report the requests they trigger (an AJAX save)
+    // and let waits detect an idle network.
+    c.Network.enable(),
   ]);
+  c.__networkEnabled = true;
 
-  // An open JavaScript dialog blocks every other CDP command, so a page that
-  // calls alert() or confirm() would otherwise hang every tool. alert and
-  // beforeunload dialogs are accepted; confirm and prompt are dismissed, which
-  // is the safe answer, and the agent is told what happened.
-  c.on("Page.javascriptDialogOpening", (p: { type: string; message: string }) => {
-    const accept = p.type === "alert" || p.type === "beforeunload";
-    addNote(
-      `A JavaScript ${p.type} dialog ("${p.message}") was ${accept ? "accepted" : "dismissed"} automatically.` +
-        (accept
-          ? ""
-          : ` To accept such dialogs, run evaluate with "window.${p.type} = () => true" before the action.`)
-    );
-    c.Page.handleJavaScriptDialog({ accept }).catch(() => {});
+  installDialogHandling(c);
+
+  // A new document in the main frame invalidates element refs.
+  c.on("Page.frameNavigated", (e: { frame: { parentId?: string } }) => {
+    if (!e.frame.parentId) documentEpoch++;
   });
 
   c.on("disconnect", () => {
@@ -210,7 +240,42 @@ async function setupClient(c: CDPClient, targetId: string): Promise<CDPClient> {
 
   client = c;
   activeTargetId = targetId;
+  documentEpoch++;
   return c;
+}
+
+/**
+ * An open JavaScript dialog blocks every other CDP command, so a page that
+ * calls alert() or confirm() would otherwise hang every tool. alert dialogs
+ * are accepted; confirm and prompt are dismissed, which is the safe answer.
+ * A beforeunload prompt means the page has unsaved work: it is dismissed,
+ * which cancels the navigation or close, unless the caller passed force. In
+ * every case the agent is told what happened.
+ */
+function installDialogHandling(c: CDPClient): void {
+  c.on("Page.javascriptDialogOpening", (p: { type: string; message: string }) => {
+    let accept: boolean;
+    if (p.type === "beforeunload") {
+      accept = forceUnload;
+      if (!accept) {
+        unloadCancelCount++;
+        addNote(
+          "The page has unsaved changes and asked to confirm leaving, so the action was cancelled to protect them. " +
+            "Save the work first, open a fresh tab with tab_new, or repeat with force: true to leave anyway."
+        );
+        c.emit(UNLOAD_CANCELLED_EVENT);
+      }
+    } else {
+      accept = p.type === "alert";
+      addNote(
+        `A JavaScript ${p.type} dialog ("${p.message}") was ${accept ? "accepted" : "dismissed"} automatically.` +
+          (accept
+            ? ""
+            : ` To accept such dialogs, run evaluate with "window.${p.type} = () => true" before the action.`)
+      );
+    }
+    c.Page.handleJavaScriptDialog({ accept }).catch(() => {});
+  });
 }
 
 /**
@@ -223,8 +288,12 @@ export async function getClient(): Promise<CDPClient> {
     connectPromise = (async () => {
       await ensureChrome();
       try {
-        const targets = await CDP.List(devtoolsOptions);
-        let target = targets.find((t) => t.type === "page" && t.webSocketDebuggerUrl);
+        const pages = (await CDP.List(devtoolsOptions)).filter(
+          (t) => t.type === "page" && t.webSocketDebuggerUrl
+        );
+        // Prefer an empty tab over one that another session may have left in
+        // the middle of a task, so a fresh agent does not land on unsaved work.
+        let target = pages.find((t) => isBlankTab(t.url)) ?? pages[0];
         // A freshly launched Chrome answers /json/version before it has a tab.
         if (!target) target = await CDP.New({ ...devtoolsOptions, url: "about:blank" });
         const c = await CDP({ ...devtoolsOptions, target });
@@ -284,6 +353,54 @@ export async function activateTarget(targetId: string): Promise<void> {
 export async function closeTarget(targetId: string): Promise<void> {
   await ensureChrome();
   await CDP.Close({ ...devtoolsOptions, id: targetId });
+}
+
+/**
+ * Close a tab the way the user would, running its beforeunload handlers
+ * (/json/close skips them and would discard unsaved work). A page that asks
+ * to confirm keeps the tab open unless `force` is set; the result says which.
+ */
+export async function closeTab(targetId: string, force: boolean): Promise<"closed" | "kept"> {
+  await ensureChrome();
+  const cancelledBefore = unloadCancelCount;
+  let temporary: CDPClient | null = null;
+  forceUnload = force;
+  try {
+    let session = client && activeTargetId === targetId ? client : null;
+    if (!session) {
+      const target = (await CDP.List(devtoolsOptions)).find((t) => t.id === targetId);
+      if (!target) throw new Error(`No tab with target ID "${targetId}". Use the tabs tool to list open tabs.`);
+      temporary = await CDP({ ...devtoolsOptions, target });
+      await temporary.Page.enable();
+      installDialogHandling(temporary);
+      session = temporary;
+    }
+    await session.Page.close();
+
+    // Wait for the tab to go away; a dismissed beforeunload prompt keeps it open.
+    const deadline = Date.now() + 2000;
+    while (Date.now() < deadline) {
+      await sleep(50);
+      if (unloadCancelCount > cancelledBefore) return "kept";
+      let targets;
+      try {
+        targets = await CDP.List(devtoolsOptions);
+      } catch {
+        return "closed"; // Chrome exited together with its last tab
+      }
+      if (!targets.some((t) => t.id === targetId)) return "closed";
+    }
+    return "kept";
+  } finally {
+    forceUnload = false;
+    if (temporary) {
+      try {
+        await temporary.close();
+      } catch {
+        /* already gone with the tab */
+      }
+    }
+  }
 }
 
 export async function disconnectClient(): Promise<void> {
