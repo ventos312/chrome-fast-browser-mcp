@@ -1,16 +1,30 @@
 {
   "name": "chrome-fast",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "High-performance Chrome browser control MCP server via CDP",
   "type": "module",
   "main": "dist/index.js",
+  "bin": {
+    "chrome-fast": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "start-chrome-debug.bat",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "tsc",
-    "start": "node dist/index.js"
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/index.js",
+    "test": "node test/e2e.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1",
-    "chrome-remote-interface": "^0.33.2"
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "chrome-remote-interface": "^0.33.2",
+    "zod": "^4.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

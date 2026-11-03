@@ -1,8 +1,24 @@
 declare module "chrome-remote-interface" {
-  interface CDPOptions {
-    port?: number;
+  interface DevToolsTarget {
+    id: string;
+    type: string;
+    title: string;
+    url: string;
+    webSocketDebuggerUrl?: string;
+    devtoolsFrontendUrl?: string;
+    [key: string]: any;
+  }
+
+  interface DevToolsOptions {
     host?: string;
-    target?: string;
+    port?: number;
+    secure?: boolean;
+  }
+
+  interface CDPOptions extends DevToolsOptions {
+    /** A target id, a target object from List/New, or a function picking one from the list. */
+    target?: string | DevToolsTarget | ((targets: DevToolsTarget[]) => DevToolsTarget | number);
+    local?: boolean;
   }
 
   interface CDPClient {
@@ -12,18 +28,24 @@ declare module "chrome-remote-interface" {
     Accessibility: any;
     Input: any;
     Network: any;
-    target: { id: string };
-    on(event: string, cb: (...args: any[]) => void): void;
+    Target: any;
+    Emulation: any;
+    webSocketUrl: string;
+    on(event: string, cb: (...args: any[]) => void): this;
+    once(event: string, cb: (...args: any[]) => void): this;
+    off(event: string, cb: (...args: any[]) => void): this;
+    removeListener(event: string, cb: (...args: any[]) => void): this;
     close(): Promise<void>;
   }
 
   function CDP(options?: CDPOptions): Promise<CDPClient>;
 
   namespace CDP {
-    function List(options?: { port?: number }): Promise<any[]>;
-    function New(options?: { port?: number; url?: string }): Promise<any>;
-    function Activate(options?: { port?: number; id: string }): Promise<void>;
-    function Close(options?: { port?: number; id: string }): Promise<void>;
+    function List(options?: DevToolsOptions): Promise<DevToolsTarget[]>;
+    function New(options?: DevToolsOptions & { url?: string }): Promise<DevToolsTarget>;
+    function Activate(options: DevToolsOptions & { id: string }): Promise<void>;
+    function Close(options: DevToolsOptions & { id: string }): Promise<void>;
+    function Version(options?: DevToolsOptions): Promise<any>;
   }
 
   export = CDP;

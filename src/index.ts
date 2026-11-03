@@ -1,9 +1,12 @@
+#!/usr/bin/env node
 import http from "http";
+import { randomUUID, timingSafeEqual } from "crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
-import { z } from "zod";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
+import { disconnectClient } from "./cdp.js";
 import { navigateToolDef, handleNavigate } from "./tools/navigate.js";
 import {
   getPageToolDef,
@@ -35,214 +38,232 @@ import {
 } from "./tools/tabs.js";
 import { waitToolDef, handleWait } from "./tools/wait.js";
 
-// Helper to wrap tool handlers with error handling
-function wrapHandler(
-  fn: (args: any) => Promise<string>
-): (args: any) => Promise<{ content: Array<{ type: "text"; text: string }> }> {
-  return async (args: any) => {
-    try {
-      const result = await fn(args);
-      return { content: [{ type: "text" as const, text: result }] };
-    } catch (err: any) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-      };
+const VERSION = "1.1.0";
+
+interface ToolDef {
+  name: string;
+  description: string;
+  schema: Record<string, any>;
+}
+
+interface ToolAnnotations {
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+}
+
+type TextHandler = (args: any) => Promise<string>;
+
+const errorResult = (err: unknown) => ({
+  content: [{ type: "text" as const, text: `Error: ${(err as Error)?.message ?? String(err)}` }],
+  // Lets the client tell a failed call from a page that happens to contain the word "Error".
+  isError: true,
+});
+
+function registerTextTool(
+  server: McpServer,
+  def: ToolDef,
+  handler: TextHandler,
+  annotations?: ToolAnnotations
+): void {
+  server.registerTool(
+    def.name,
+    { description: def.description, inputSchema: def.schema, annotations },
+    async (args: any) => {
+      try {
+        return { content: [{ type: "text" as const, text: await handler(args) }] };
+      } catch (err) {
+        return errorResult(err);
+      }
     }
-  };
+  );
 }
 
 function createServer(): McpServer {
-  const server = new McpServer({
-    name: "chrome-fast",
-    version: "1.0.0",
-  });
+  const server = new McpServer({ name: "chrome-fast", version: VERSION });
 
-  // Navigate
-  server.tool(
-    "navigate",
-    navigateToolDef.description,
-    { url: z.string(), waitUntil: z.enum(["load", "domcontentloaded", "networkidle"]).optional() },
-    wrapHandler(handleNavigate)
-  );
+  registerTextTool(server, navigateToolDef, handleNavigate);
+  registerTextTool(server, getPageToolDef, handleGetPage, { readOnlyHint: true });
 
-  // Get page
-  server.tool(
-    "get_page",
-    getPageToolDef.description,
-    { format: z.enum(["accessibility", "html"]).optional() },
-    wrapHandler(handleGetPage)
-  );
-
-  // Screenshot (returns image)
-  server.tool(
-    "screenshot",
-    screenshotToolDef.description,
+  // Screenshot returns an image block instead of text
+  server.registerTool(
+    screenshotToolDef.name,
     {
-      format: z.enum(["png", "jpeg"]).optional(),
-      quality: z.number().optional(),
-      fullPage: z.boolean().optional(),
+      description: screenshotToolDef.description,
+      inputSchema: screenshotToolDef.schema,
+      annotations: { readOnlyHint: true },
     },
-    async (args) => {
+    async (args: any) => {
       try {
         const result = await handleScreenshot(args);
         return {
-          content: [
-            {
-              type: "image" as const,
-              data: result.data,
-              mimeType: result.mimeType,
-            },
-          ],
+          content: [{ type: "image" as const, data: result.data, mimeType: result.mimeType }],
         };
-      } catch (err: any) {
-        return {
-          content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-        };
+      } catch (err) {
+        return errorResult(err);
       }
     }
   );
 
-  // Evaluate
-  server.tool(
-    "evaluate",
-    evaluateToolDef.description,
-    { expression: z.string() },
-    wrapHandler(handleEvaluate)
-  );
-
-  // Click
-  server.tool(
-    "click",
-    clickToolDef.description,
-    { selector: z.string(), button: z.enum(["left", "right", "middle"]).optional() },
-    wrapHandler(handleClick)
-  );
-
-  // Type
-  server.tool(
-    "type",
-    typeToolDef.description,
-    {
-      selector: z.string(),
-      text: z.string(),
-      clear: z.boolean().optional(),
-      pressEnter: z.boolean().optional(),
-    },
-    wrapHandler(handleType)
-  );
-
-  // Scroll
-  server.tool(
-    "scroll",
-    scrollToolDef.description,
-    {
-      selector: z.string().optional(),
-      direction: z.enum(["up", "down"]).optional(),
-      amount: z.number().optional(),
-    },
-    wrapHandler(handleScroll)
-  );
-
-  // Fill form
-  server.tool(
-    "fill_form",
-    fillFormToolDef.description,
-    {
-      fields: z.array(
-        z.object({ selector: z.string(), value: z.string() })
-      ),
-      submit: z.boolean().optional(),
-    },
-    wrapHandler(handleFillForm)
-  );
-
-  // Tabs
-  server.tool("tabs", tabsToolDef.description, {}, wrapHandler(handleTabs));
-
-  server.tool(
-    "tab_new",
-    tabNewToolDef.description,
-    { url: z.string().optional() },
-    wrapHandler(handleTabNew)
-  );
-
-  server.tool(
-    "tab_switch",
-    tabSwitchToolDef.description,
-    { targetId: z.string() },
-    wrapHandler(handleTabSwitch)
-  );
-
-  server.tool(
-    "tab_close",
-    tabCloseToolDef.description,
-    { targetId: z.string().optional() },
-    wrapHandler(handleTabClose)
-  );
-
-  // Wait
-  server.tool(
-    "wait",
-    waitToolDef.description,
-    {
-      selector: z.string().optional(),
-      timeout: z.number().optional(),
-      time: z.number().optional(),
-      networkIdle: z.boolean().optional(),
-    },
-    wrapHandler(handleWait)
-  );
+  registerTextTool(server, evaluateToolDef, handleEvaluate);
+  registerTextTool(server, clickToolDef, handleClick);
+  registerTextTool(server, typeToolDef, handleType);
+  registerTextTool(server, scrollToolDef, handleScroll);
+  registerTextTool(server, fillFormToolDef, handleFillForm);
+  registerTextTool(server, tabsToolDef, handleTabs, { readOnlyHint: true });
+  registerTextTool(server, tabNewToolDef, handleTabNew);
+  registerTextTool(server, tabSwitchToolDef, handleTabSwitch);
+  registerTextTool(server, tabCloseToolDef, handleTabClose, { destructiveHint: true });
+  registerTextTool(server, waitToolDef, handleWait, { readOnlyHint: true });
 
   return server;
 }
 
-async function main() {
-  const httpPort = parseInt(process.env.MCP_HTTP_PORT || "0", 10);
+/** `--http [port]` on the command line, or MCP_HTTP_PORT; 0 means stdio mode. */
+function parseHttpPort(argv: string[]): number {
+  let port = parseInt(process.env.MCP_HTTP_PORT || "0", 10) || 0;
+  const flag = argv.indexOf("--http");
+  if (flag !== -1) {
+    const next = argv[flag + 1];
+    port = next && /^\d+$/.test(next) ? parseInt(next, 10) : port || 3500;
+  }
+  return port;
+}
 
-  if (httpPort) {
-    // HTTP/SSE mode: run as a persistent server on Windows so Docker containers
-    // can connect via http://host.docker.internal:PORT/sse
-    const transports = new Map<string, SSEServerTransport>();
+const HTTP_TOKEN = process.env.MCP_HTTP_TOKEN || "";
 
-    const httpServer = http.createServer(async (req, res) => {
-      try {
-        if (req.method === "GET" && req.url === "/sse") {
-          const server = createServer();
-          const transport = new SSEServerTransport("/messages", res);
-          transports.set(transport.sessionId, transport);
-          transport.onclose = () => {
-            transports.delete(transport.sessionId);
-          };
-          await server.connect(transport);
-        } else if (req.method === "POST" && req.url?.startsWith("/messages")) {
-          const url = new URL(req.url, `http://localhost:${httpPort}`);
-          const sessionId = url.searchParams.get("sessionId") ?? "";
-          const transport = transports.get(sessionId);
-          if (transport) {
-            await transport.handlePostMessage(req, res);
-          } else {
-            res.writeHead(404).end("Session not found");
-          }
-        } else if (req.method === "GET" && req.url === "/health") {
-          res.writeHead(200, { "Content-Type": "text/plain" }).end("ok");
-        } else {
-          res.writeHead(404).end();
-        }
-      } catch (err: any) {
-        process.stderr.write(`HTTP error: ${err.message}\n`);
-        if (!res.headersSent) res.writeHead(500).end(err.message);
+/** With MCP_HTTP_TOKEN set, every MCP request must carry it as a bearer token. */
+function authorized(req: http.IncomingMessage): boolean {
+  if (!HTTP_TOKEN) return true;
+  const header = req.headers.authorization ?? "";
+  const expected = Buffer.from(`Bearer ${HTTP_TOKEN}`);
+  const actual = Buffer.from(header);
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
+let shuttingDown = false;
+function shutdown(code = 0): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  disconnectClient().finally(() => process.exit(code));
+}
+
+async function runHttp(port: number): Promise<void> {
+  const host = process.env.MCP_HTTP_HOST || "0.0.0.0";
+
+  // Streamable HTTP (current MCP transport), one session per client at /mcp
+  const streamable = new Map<string, StreamableHTTPServerTransport>();
+  // Legacy HTTP+SSE transport at /sse and /messages, kept for older clients
+  const sse = new Map<string, SSEServerTransport>();
+
+  const handleStreamable = async (req: http.IncomingMessage, res: http.ServerResponse) => {
+    const sessionHeader = req.headers["mcp-session-id"];
+    const existing = typeof sessionHeader === "string" ? streamable.get(sessionHeader) : undefined;
+    if (existing) {
+      await existing.handleRequest(req, res);
+      return;
+    }
+    if (req.method !== "POST") {
+      res.writeHead(400, { "Content-Type": "application/json" }).end(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          error: { code: -32000, message: "Bad Request: no active session; send an initialize request first" },
+          id: null,
+        })
+      );
+      return;
+    }
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+      onsessioninitialized: (id) => {
+        streamable.set(id, transport);
+      },
+      onsessionclosed: (id) => {
+        streamable.delete(id);
+      },
+    });
+    transport.onclose = () => {
+      if (transport.sessionId) streamable.delete(transport.sessionId);
+    };
+    await createServer().connect(transport);
+    // The transport itself rejects anything but an initialize request here.
+    await transport.handleRequest(req, res);
+  };
+
+  const httpServer = http.createServer(async (req, res) => {
+    const url = new URL(req.url ?? "/", `http://${req.headers.host || "localhost"}`);
+    try {
+      if (req.method === "GET" && url.pathname === "/health") {
+        res.writeHead(200, { "Content-Type": "text/plain" }).end("ok");
+        return;
       }
-    });
+      if (!authorized(req)) {
+        res.writeHead(401, { "WWW-Authenticate": "Bearer" }).end("Unauthorized");
+        return;
+      }
+      if (url.pathname === "/mcp") {
+        await handleStreamable(req, res);
+      } else if (req.method === "GET" && url.pathname === "/sse") {
+        const server = createServer();
+        const transport = new SSEServerTransport("/messages", res);
+        sse.set(transport.sessionId, transport);
+        transport.onclose = () => {
+          sse.delete(transport.sessionId);
+        };
+        await server.connect(transport);
+      } else if (req.method === "POST" && url.pathname === "/messages") {
+        const transport = sse.get(url.searchParams.get("sessionId") ?? "");
+        if (transport) {
+          await transport.handlePostMessage(req, res);
+        } else {
+          res.writeHead(404).end("Session not found");
+        }
+      } else {
+        res.writeHead(404).end("Not found");
+      }
+    } catch (err: any) {
+      process.stderr.write(`HTTP error: ${err.message}\n`);
+      if (!res.headersSent) res.writeHead(500).end(err.message);
+    }
+  });
 
-    httpServer.listen(httpPort, "0.0.0.0", () => {
-      process.stderr.write(`chrome-fast MCP server listening on port ${httpPort}\n`);
-    });
+  httpServer.on("error", (err) => {
+    process.stderr.write(`Fatal: cannot listen on ${host}:${port}: ${err.message}\n`);
+    process.exit(1);
+  });
+
+  httpServer.listen(port, host, () => {
+    process.stderr.write(
+      `chrome-fast MCP server listening on http://${host}:${port} ` +
+        `(Streamable HTTP at /mcp, legacy SSE at /sse${HTTP_TOKEN ? ", bearer token required" : ""})\n`
+    );
+  });
+
+  const stop = () => {
+    httpServer.close();
+    shutdown(0);
+  };
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
+}
+
+async function runStdio(): Promise<void> {
+  const server = createServer();
+  const transport = new StdioServerTransport();
+  // Exit when the client goes away, so no orphaned server keeps Chrome's socket open.
+  transport.onclose = () => shutdown(0);
+  process.stdin.on("end", () => shutdown(0));
+  process.on("SIGINT", () => shutdown(0));
+  process.on("SIGTERM", () => shutdown(0));
+  await server.connect(transport);
+  process.stderr.write("chrome-fast MCP server running on stdio\n");
+}
+
+async function main() {
+  const httpPort = parseHttpPort(process.argv.slice(2));
+  if (httpPort) {
+    await runHttp(httpPort);
   } else {
-    // stdio mode (default): for direct use in Claude Code or local dev
-    const server = createServer();
-    const transport = new StdioServerTransport();
-    await server.connect(transport);
-    process.stderr.write("chrome-fast MCP server running on stdio\n");
+    await runStdio();
   }
 }
 
